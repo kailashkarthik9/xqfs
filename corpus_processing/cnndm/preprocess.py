@@ -3,12 +3,14 @@ import glob
 import hashlib
 import json
 import logging
+import pickle
 import random
 from enum import Enum
 from os import path
 
 import nltk.data
 from multiprocess.pool import Pool
+from sklearn.feature_extraction.text import TfidfVectorizer
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ class PreProcessingStage(Enum):
     SENTENCE_SPLIT = 'sentence_split'
     TVT_SPLIT = 'tvt_split'
     TRANSLATION_PREP = 'translation_prep'
+    IDF_PREP = 'idf_prep'
 
     def __str__(self):
         return self.value
@@ -202,6 +205,24 @@ class CnnDmPreprocessor:
             logger.info(f'All tests OK. {split} split prepared for translation')
         logger.info('Translation Prep stage completed!')
 
+    @staticmethod
+    def perform_idf_prep(tvt_dir, idf_model_dir, idf_model_name):
+        logger.info('IDF Prep stage started')
+        logger.info('Aggregating articles and summaries from all dataset splits')
+        corpus = list()
+        for split in DATASET_SPLITS:
+            split_data = json.load(open(path.join(tvt_dir, split + '.json')))
+            for data in split_data:
+                sentences = data['article'] + data['summary']
+                text = ' '.join(sentences)
+                corpus.append(text)
+        logger.info('Training IDF model')
+        vectorizer = TfidfVectorizer()
+        vectorizer.fit(corpus)
+        logger.info('Saving IDF model')
+        pickle.dump(vectorizer, open(path.join(idf_model_dir, idf_model_name), 'wb'))
+        logger.info('IDF Prep stage completed!')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -210,6 +231,8 @@ if __name__ == '__main__':
     parser.add_argument("-tvt_dir", type=str, default='data/cnndm/tvt')
     parser.add_argument("-urls_dir", type=str, default='metadata/urls')
     parser.add_argument("-translation_files_dir", type=str, default='data/cnndm/translation')
+    parser.add_argument("-idf_model_dir", type=str, default='models/idf')
+    parser.add_argument("-idf_model_name", type=str, default='idf_cnndm.pkl')
     parser.add_argument("-n_cpus", type=int, default=8)
     parser.add_argument('-stage', required=True, type=PreProcessingStage, choices=list(PreProcessingStage))
     args = parser.parse_args()
@@ -220,3 +243,5 @@ if __name__ == '__main__':
         CnnDmPreprocessor.perform_tvt_split(args.sentence_ized_stories_dir, args.tvt_dir, args.urls_dir)
     elif args.stage == PreProcessingStage.TRANSLATION_PREP:
         CnnDmPreprocessor.perform_translation_prep(args.tvt_dir, args.translation_files_dir)
+    elif args.stage == PreProcessingStage.IDF_PREP:
+        CnnDmPreprocessor.perform_idf_prep(args.tvt_dir, args.idf_model_dir, args.idf_model_name)
