@@ -1,2 +1,3 @@
 /data/
 /.idea/
+/models/sent2vec/wiki_bigrams.bin
