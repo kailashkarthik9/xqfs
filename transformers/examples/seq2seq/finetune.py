@@ -116,7 +116,7 @@ class SummarizationModule(BaseTransformer):
     def save_readable_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, List[str]]:
         """A debugging utility"""
         readable_batch = {
-            k: self.tokenizer.batch_decode(v.tolist()) if "mask" not in k else v.shape for k, v in batch.items()
+            k: self.tokenizer.batch_decode(v.tolist()) if k in ['input_ids', 'labels', 'ids', 'decoder_input_ids'] else v.shape for k, v in batch.items()
         }
         save_json(readable_batch, Path(self.output_dir) / "text_batch.json")
         save_json({k: v.tolist() for k, v in batch.items()}, Path(self.output_dir) / "tok_batch.json")
@@ -135,7 +135,7 @@ class SummarizationModule(BaseTransformer):
 
     def _step(self, batch: dict) -> Tuple:
         pad_token_id = self.tokenizer.pad_token_id
-        src_ids, src_mask = batch["input_ids"], batch["attention_mask"]
+        src_ids, src_mask, src_query_relevance_ids = batch["input_ids"], batch["attention_mask"], batch['query_relevance_ids']
         tgt_ids = batch["labels"]
         if isinstance(self.model, T5ForConditionalGeneration):
             decoder_input_ids = self.model._shift_right(tgt_ids)
@@ -145,13 +145,13 @@ class SummarizationModule(BaseTransformer):
             batch["decoder_input_ids"] = decoder_input_ids
             self.save_readable_batch(batch)
 
-        outputs = self(src_ids, attention_mask=src_mask, decoder_input_ids=decoder_input_ids, use_cache=False)
+        outputs = self(src_ids, attention_mask=src_mask, decoder_input_ids=decoder_input_ids, use_cache=False, query_relevance_ids=src_query_relevance_ids)
         lm_logits = outputs["logits"]
         if self.hparams.label_smoothing == 0:
             # Same behavior as modeling_bart.py, besides ignoring pad_token_id
             ce_loss_fct = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
-            assert lm_logits.shape[-1] == self.vocab_size
+            assert (lm_logits.shape[-1] == self.vocab_size or lm_logits.shape[-1] == self.vocab_size + 1)
             loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.view(-1))
         else:
             lprobs = torch.nn.functional.log_softmax(lm_logits, dim=-1)
