@@ -28,12 +28,15 @@ KEYPHRASES_EXTRACTED_PER_DOCUMENT = 10
 MAX_QUERIES_PER_DOCUMENT = 3
 # This threshold is chosen by inspecting the cumulative distribution created in the statistics plotting phase
 KEYPHRASE_SCORE_THRESHOLD = 0.7
+# This separator must be shared by Pegasus' tokenizer so that it is not split
+QUERY_SEPARATOR = '[Q]'
 
 
 class QfsCorpusGenerationStage(Enum):
     KEYPHRASE_EXTRACTION = 'keyphrase_extraction'
     STATISTICS_PLOTTING = 'statistics_plotting'
     QFS_CORPUS_CREATION = 'qfs_corpus_creation'
+    TRANSFORMER_FORMATTING = 'transformer_formatting'
 
 
 class QfsCorpusGenerator:
@@ -144,7 +147,7 @@ class QfsCorpusGenerator:
         logger.info('Statistics plotting stage completed!')
 
     @staticmethod
-    def perform_qfs_corpus_creation(qfs_dir):
+    def perform_qfs_corpus_creation(keyphrase_dir, qfs_dir):
         logger.info('QFS corpus creation stage started')
         for split in DATASET_SPLITS:
             selected_query_distribution = list()
@@ -153,8 +156,9 @@ class QfsCorpusGenerator:
                 logger.info(f'Skipping {split} split')
                 continue
             logger.info(f'Generating QFS corpus for {split} split')
-            split_keyphrase_data = json.load(open(path.join(args.keyphrase_dir, split + '.query.json')))
+            split_keyphrase_data = json.load(open(path.join(keyphrase_dir, split + '.query.json')))
             qfs_data = list()
+            query_agnostic_data = list()
             for doc in tqdm(split_keyphrase_data):
                 keyphrases = pd.DataFrame(doc['keyphrases'])
                 filtered_keyphrases = keyphrases[keyphrases['score'] >= KEYPHRASE_SCORE_THRESHOLD]
@@ -176,14 +180,18 @@ class QfsCorpusGenerator:
                     selected_queries_count += 1
                     selected_queries[query] = keyphrase['score']
                     selected_summary_combinations.add(summary_set)
-                    qfs_data.append({
+                    datum = {
                         'article': doc['article'],
                         'query': query,
                         'summary': summary,
                         'id': doc['id'] + '_' + str(selected_queries_count)
-                    })
+                    }
+                    qfs_data.append(datum)
+                    if selected_queries_count == 1:
+                        query_agnostic_data.append(datum)
                 selected_query_distribution.append(selected_queries_count)
-            json.dump(qfs_data, open(path.join(qfs_dir, split + '.qfs.json'), 'w'), indent=4)
+            json.dump(qfs_data, open(path.join(qfs_dir, split + '.qfs.multiple.json'), 'w'), indent=4)
+            json.dump(query_agnostic_data, open(path.join(qfs_dir, split + '.qfs.single.json'), 'w'), indent=4)
             plt.figure()
             sns.histplot(selected_query_distribution, fill=True, bins=[i for i in range(0, 4, 1)])
             plt.xlabel('Query Count')
@@ -191,6 +199,60 @@ class QfsCorpusGenerator:
             plt.title('Distribution of Queries Selected per Document')
             plt.savefig(path.join(qfs_dir, split + '.qfs.png'))
             json.dump(selected_queries, open(path.join(qfs_dir, split + '.queries.json'), 'w'), indent=4)
+        logger.info('QFS corpus creation stage completed!')
+
+    @staticmethod
+    def perform_transformer_formatting(qfs_dir, summarization_dir):
+        logger.info('Transformer formatting stage started')
+        for split in DATASET_SPLITS:
+            if split in splits_to_exclude:
+                logger.info(f'Skipping {split} split')
+                continue
+            logger.info(f'Formatting {split} split')
+            single_query_corpus = json.load(open(path.join(qfs_dir, split + '.qfs.single.json')))
+            qfs_single_source = list()
+            qfs_single_target = list()
+            qas_single_source = list()
+            qas_single_target = list()
+            logger.info(f'Formatting single query corpus')
+            for doc in tqdm(single_query_corpus):
+                article = ' '.join(doc['article'])
+                summary = ' '.join(doc['summary'])
+                query = doc['query']
+                qfs_single_source.append(query + ' ' + QUERY_SEPARATOR + ' ' + article)
+                qas_single_source.append(article)
+                qfs_single_target.append(summary)
+                qas_single_target.append(summary)
+            with open(path.join(summarization_dir, split + '.qfs.single.source'), 'w') as fp:
+                for line in qfs_single_source:
+                    fp.write(line + '\n')
+            with open(path.join(summarization_dir, split + '.qfs.single.target'), 'w') as fp:
+                for line in qfs_single_target:
+                    fp.write(line + '\n')
+            with open(path.join(summarization_dir, split + '.qas.single.source'), 'w') as fp:
+                for line in qas_single_source:
+                    fp.write(line + '\n')
+            with open(path.join(summarization_dir, split + '.qas.single.target'), 'w') as fp:
+                for line in qas_single_target:
+                    fp.write(line + '\n')
+
+            multiple_query_corpus = json.load(open(path.join(qfs_dir, split + '.qfs.multiple.json')))
+            qfs_multi_source = list()
+            qfs_multi_target = list()
+            logger.info(f'Formatting multiple query corpus')
+            for doc in tqdm(multiple_query_corpus):
+                article = ' '.join(doc['article'])
+                summary = ' '.join(doc['summary'])
+                query = doc['query']
+                qfs_multi_source.append(query + ' ' + QUERY_SEPARATOR + ' ' + article)
+                qfs_multi_target.append(summary)
+            with open(path.join(summarization_dir, split + '.qfs.multiple.source'), 'w') as fp:
+                for line in qfs_multi_source:
+                    fp.write(line + '\n')
+            with open(path.join(summarization_dir, split + '.qfs.multiple.target'), 'w') as fp:
+                for line in qfs_multi_target:
+                    fp.write(line + '\n')
+        logger.info('Transformer formatting stage completed!')
 
 
 if __name__ == '__main__':
@@ -198,6 +260,7 @@ if __name__ == '__main__':
     parser.add_argument("-tvt_dir", type=str, default='data/cnndm/tvt')
     parser.add_argument("-keyphrase_dir", type=str, default='data/cnndm/keyphrase')
     parser.add_argument("-qfs_dir", type=str, default='data/cnndm/qfs')
+    parser.add_argument("-summarization_dir", type=str, default='data/cnndm/summarization')
     parser.add_argument("-sent2vec_model", type=str, default='models/sent2vec/wiki_bigrams.bin')
     parser.add_argument("-idf_model", type=str, default='models/idf/idf_cnndm.pkl')
     parser.add_argument("-dataset_split", type=str, default='*')
@@ -214,4 +277,6 @@ if __name__ == '__main__':
     elif args.stage == QfsCorpusGenerationStage.STATISTICS_PLOTTING:
         qfs_corpus_generator.perform_statistics_plotting(args.keyphrase_dir)
     elif args.stage == QfsCorpusGenerationStage.QFS_CORPUS_CREATION:
-        qfs_corpus_generator.perform_qfs_corpus_creation(args.qfs_dir)
+        qfs_corpus_generator.perform_qfs_corpus_creation(args.keyphrase_dir, args.qfs_dir)
+    elif args.stage == QfsCorpusGenerationStage.TRANSFORMER_FORMATTING:
+        qfs_corpus_generator.perform_transformer_formatting(args.qfs_dir, args.summarization_dir)
