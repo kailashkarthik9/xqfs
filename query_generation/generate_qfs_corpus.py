@@ -2,6 +2,7 @@ import argparse
 import glob
 import logging
 import pickle
+import random
 from enum import Enum
 
 from query_generation.keyphrase_extraction.launch import load_local_embedding_distributor, extract_keyphrases
@@ -37,6 +38,7 @@ class QfsCorpusGenerationStage(Enum):
     STATISTICS_PLOTTING = 'statistics_plotting'
     QFS_CORPUS_CREATION = 'qfs_corpus_creation'
     TRANSFORMER_FORMATTING = 'transformer_formatting'
+    HYPOTHESIS_TESTER_CORPUS_CREATION = 'hypothesis_tester_corpus_creation'
 
 
 class QfsCorpusGenerator:
@@ -72,8 +74,9 @@ class QfsCorpusGenerator:
             split_data = json.load(open(path.join(tvt_dir, split + '.json')))
             for data in tqdm(split_data):
                 summary_text = ' '.join(data['summary'])
-                keyphrases, scores, synsets = extract_keyphrases(self.embedding_distributor, self.pos_tagger, self.idf_model,
-                                                        summary_text, KEYPHRASES_EXTRACTED_PER_DOCUMENT, 'en')
+                keyphrases, scores, synsets = extract_keyphrases(self.embedding_distributor, self.pos_tagger,
+                                                                 self.idf_model,
+                                                                 summary_text, KEYPHRASES_EXTRACTED_PER_DOCUMENT, 'en')
                 keyphrase_json = [
                     {
                         'keyphrase': keyphrase,
@@ -110,7 +113,7 @@ class QfsCorpusGenerator:
                     keyphrase_scores.append(keyphrase['score'])
                     keyphrase_lengths.append(len(keyphrase['summary']))
                     for idx in range(10):
-                        if keyphrase['score'] > idx/10:
+                        if keyphrase['score'] > idx / 10:
                             keyphrase_cumulative_scores[idx] += 1
 
         logger.info('Generating statistic plots')
@@ -131,14 +134,14 @@ class QfsCorpusGenerator:
         plt.savefig(path.join(keyphrase_dir, 'keyphrase_lengths.png'))
 
         plt.figure()
-        sns.histplot(keyphrase_scores, fill=True, bins=[i/10 for i in range(0, 11, 1)])
+        sns.histplot(keyphrase_scores, fill=True, bins=[i / 10 for i in range(0, 11, 1)])
         plt.xlabel('Score')
         plt.ylabel('Keyphrases')
         plt.title('Distribution of Keyphrase Scores')
         plt.savefig(path.join(keyphrase_dir, 'keyphrase_scores.png'))
 
         plt.figure()
-        sns.barplot(y=keyphrase_cumulative_scores, x=[i/10 for i in range(10)], color='dodgerblue')
+        sns.barplot(y=keyphrase_cumulative_scores, x=[i / 10 for i in range(10)], color='dodgerblue')
         plt.xlabel('Score Greater Than')
         plt.ylabel('Keyphrases')
         plt.title('Cumulative Distribution of Keyphrase Scores')
@@ -254,6 +257,39 @@ class QfsCorpusGenerator:
                     fp.write(line + '\n')
         logger.info('Transformer formatting stage completed!')
 
+    @staticmethod
+    def perform_hypothesis_tester_corpus_creation(summarization_dir, hypothesis_corpus_dir, dataset_split, summarization_corpus):
+        logger.info('Hypothesis tester corpus creation stage started')
+        if dataset_split == '*':
+            raise Exception('Please specify a dataset split to create the tester corpus')
+        random.seed(9)
+        with open(path.join(summarization_dir, dataset_split + f'.{summarization_corpus}.source')) as fp:
+            qas_sources = fp.read().strip().split('\n')
+        with open(path.join(summarization_dir, dataset_split + f'.{summarization_corpus}.target')) as fp:
+            qas_targets = fp.read().strip().split('\n')
+        qas_corpus = zip(qas_sources, qas_targets)
+        qas_corpus = list(qas_corpus)
+        random.shuffle(qas_corpus)
+        train = qas_corpus[:int(0.7 * len(qas_corpus))]
+        val = qas_corpus[int(0.7 * len(qas_corpus)): int(0.85 * len(qas_corpus))]
+        test = qas_corpus[int(0.85 * len(qas_corpus)):]
+        with open(path.join(hypothesis_corpus_dir, f'{summarization_corpus}', 'train.source'), 'w') as source_fp, open(
+                path.join(hypothesis_corpus_dir, f'{summarization_corpus}', 'train.target'), 'w') as target_fp:
+            for source, target in train:
+                source_fp.write(source + '\n')
+                target_fp.write(target + '\n')
+        with open(path.join(hypothesis_corpus_dir, f'{summarization_corpus}', 'val.source'), 'w') as source_fp, open(
+                path.join(hypothesis_corpus_dir, f'{summarization_corpus}', 'val.target'), 'w') as target_fp:
+            for source, target in val:
+                source_fp.write(source + '\n')
+                target_fp.write(target + '\n')
+        with open(path.join(hypothesis_corpus_dir, f'{summarization_corpus}', 'test.source'), 'w') as source_fp, open(
+                path.join(hypothesis_corpus_dir, f'{summarization_corpus}', 'test.target'), 'w') as target_fp:
+            for source, target in test:
+                source_fp.write(source + '\n')
+                target_fp.write(target + '\n')
+        logger.info('Hypothesis tester corpus creation stage completed!')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -261,6 +297,8 @@ if __name__ == '__main__':
     parser.add_argument("-keyphrase_dir", type=str, default='data/cnndm/keyphrase')
     parser.add_argument("-qfs_dir", type=str, default='data/cnndm/qfs')
     parser.add_argument("-summarization_dir", type=str, default='data/cnndm/summarization')
+    parser.add_argument("-hypothesis_corpus_dir", type=str, default='data/cnndm/hypothesis_tester')
+    parser.add_argument("-hypothesis_corpus", type=str, default='qas.single')
     parser.add_argument("-sent2vec_model", type=str, default='models/sent2vec/wiki_bigrams.bin')
     parser.add_argument("-idf_model", type=str, default='models/idf/idf_cnndm.pkl')
     parser.add_argument("-dataset_split", type=str, default='*')
@@ -273,10 +311,15 @@ if __name__ == '__main__':
         splits_to_exclude = [split for split in DATASET_SPLITS if split != args.dataset_split]
 
     if args.stage == QfsCorpusGenerationStage.KEYPHRASE_EXTRACTION:
-        qfs_corpus_generator.perform_keyphrase_extraction(args.tvt_dir, args.keyphrase_dir, args.sent2vec_model, args.idf_model, splits_to_exclude)
+        qfs_corpus_generator.perform_keyphrase_extraction(args.tvt_dir, args.keyphrase_dir, args.sent2vec_model,
+                                                          args.idf_model, splits_to_exclude)
     elif args.stage == QfsCorpusGenerationStage.STATISTICS_PLOTTING:
         qfs_corpus_generator.perform_statistics_plotting(args.keyphrase_dir)
     elif args.stage == QfsCorpusGenerationStage.QFS_CORPUS_CREATION:
         qfs_corpus_generator.perform_qfs_corpus_creation(args.keyphrase_dir, args.qfs_dir)
     elif args.stage == QfsCorpusGenerationStage.TRANSFORMER_FORMATTING:
         qfs_corpus_generator.perform_transformer_formatting(args.qfs_dir, args.summarization_dir)
+    elif args.stage == QfsCorpusGenerationStage.HYPOTHESIS_TESTER_CORPUS_CREATION:
+        qfs_corpus_generator.perform_hypothesis_tester_corpus_creation(args.summarization_dir,
+                                                                       args.hypothesis_corpus_dir, args.dataset_split,
+                                                                       args.hypothesis_corpus)
