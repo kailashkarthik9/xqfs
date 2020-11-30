@@ -1329,3 +1329,367 @@ class SinusoidalPositionalEmbedding(nn.Embedding):
             # starts at 0, ends at 1-seq_len
             positions = torch.arange(seq_len, dtype=torch.long, device=self.weight.device)
         return super().forward(positions)
+
+
+# Query Focused Summarization Classes
+
+class QfsBartEncoder(nn.Module):
+    """
+    Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
+    :class:`EncoderLayer`.
+
+    Args:
+        config: BartConfig
+    """
+
+    def __init__(self, config: BartConfig, embed_tokens):
+        super().__init__()
+
+        self.dropout = config.dropout
+        self.layerdrop = config.encoder_layerdrop
+
+        embed_dim = embed_tokens.embedding_dim
+        self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
+        self.padding_idx = embed_tokens.padding_idx
+        self.max_source_positions = config.max_position_embeddings
+
+        self.embed_tokens = embed_tokens
+        if config.static_position_embeddings:
+            self.embed_positions = SinusoidalPositionalEmbedding(
+                config.max_position_embeddings, embed_dim, self.padding_idx
+            )
+        else:
+            self.embed_positions = LearnedPositionalEmbedding(
+                config.max_position_embeddings,
+                embed_dim,
+                self.padding_idx,
+                config.extra_pos_embeddings,
+            )
+        self.encode_query = nn.Embedding(2, config.hidden_size)
+        self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.encoder_layers)])
+        self.layernorm_embedding = LayerNorm(embed_dim) if config.normalize_embedding else nn.Identity()
+        # mbart has one extra layer_norm
+        self.layer_norm = LayerNorm(config.d_model) if config.add_final_layer_norm else None
+
+    def forward(
+            self, input_ids, query_relevance_ids=None, attention_mask=None, output_attentions=False, output_hidden_states=False, return_dict=True
+    ):
+        """
+        Args:
+            input_ids (LongTensor): tokens in the source language of shape
+                `(batch, src_len)`
+            attention_mask (torch.LongTensor): indicating which indices are padding tokens
+
+        Returns:
+            BaseModelOutput or Tuple comprised of:
+
+                - **x** (Tensor): the last encoder layer's output of shape `(src_len, batch, embed_dim)`
+                - **encoder_states** (tuple(torch.FloatTensor)): all intermediate hidden states of shape `(src_len,
+                  batch, embed_dim)`. Only populated if *output_hidden_states:* is True.
+                - **all_attentions** (tuple(torch.FloatTensor)): Attention weights for each layer.
+                During training might not be of length n_layers because of layer dropout.
+        """
+        # check attention mask and invert
+        if attention_mask is not None:
+            attention_mask = invert_mask(attention_mask)
+
+        inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
+        embed_pos = self.embed_positions(input_ids)
+        if query_relevance_ids is None:
+            logger.warning('QFS BART model used but query relevance ids are not provided. Proceed with caution!')
+            query_relevance_ids = torch.zeros(input_ids.size(), dtype=torch.long, device=self.embed_positions.weight.device)
+        query_relevance_embeddings = self.encode_query(query_relevance_ids)
+        x = inputs_embeds + embed_pos + query_relevance_embeddings
+        x = self.layernorm_embedding(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+
+        encoder_states = [] if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+        for encoder_layer in self.layers:
+            if output_hidden_states:
+                encoder_states.append(x)
+            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            dropout_probability = random.uniform(0, 1)
+            if self.training and (dropout_probability < self.layerdrop):  # skip the layer
+                attn = None
+            else:
+                x, attn = encoder_layer(x, attention_mask, output_attentions=output_attentions)
+
+            if output_attentions:
+                all_attentions = all_attentions + (attn,)
+
+        if self.layer_norm:
+            x = self.layer_norm(x)
+        if output_hidden_states:
+            encoder_states.append(x)
+            # T x B x C -> B x T x C
+            encoder_states = tuple(hidden_state.transpose(0, 1) for hidden_state in encoder_states)
+
+        # T x B x C -> B x T x C
+        x = x.transpose(0, 1)
+
+        if not return_dict:
+            return tuple(v for v in [x, encoder_states, all_attentions] if v is not None)
+        return BaseModelOutput(last_hidden_state=x, hidden_states=encoder_states, attentions=all_attentions)
+
+
+@add_start_docstrings(
+    "The bar QFS BART Model outputting raw hidden-states without any specific head on top.",
+    BART_START_DOCSTRING,
+)
+class QfsBartModel(PretrainedBartModel):
+    def __init__(self, config: BartConfig):
+        super().__init__(config)
+
+        padding_idx, vocab_size = config.pad_token_id, config.vocab_size
+        self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
+
+        self.encoder = QfsBartEncoder(config, self.shared)
+        self.decoder = BartDecoder(config, self.shared)
+
+        self.init_weights()
+
+    @add_start_docstrings_to_model_forward(BART_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint="facebook/bart-large",
+        output_type=Seq2SeqModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+            self,
+            input_ids,
+            query_relevance_ids=None,
+            attention_mask=None,
+            decoder_input_ids=None,
+            decoder_attention_mask=None,
+            encoder_outputs: Optional[Tuple] = None,
+            past_key_values=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+    ):
+
+        if decoder_input_ids is None:
+            use_cache = False
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # make masks if user doesn't supply
+        if not use_cache:
+            decoder_input_ids, decoder_padding_mask, causal_mask = _prepare_bart_decoder_inputs(
+                self.config,
+                input_ids,
+                decoder_input_ids=decoder_input_ids,
+                decoder_padding_mask=decoder_attention_mask,
+                causal_mask_dtype=self.shared.weight.dtype,
+            )
+        else:
+            decoder_padding_mask, causal_mask = None, None
+
+        assert decoder_input_ids is not None
+
+        if encoder_outputs is None:
+            encoder_outputs = self.encoder(
+                input_ids=input_ids,
+                query_relevance_ids=query_relevance_ids,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+        # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOutput when return_dict=False
+        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
+            encoder_outputs = BaseModelOutput(
+                last_hidden_state=encoder_outputs[0],
+                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
+                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+            )
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        decoder_outputs = self.decoder(
+            decoder_input_ids,
+            encoder_outputs[0],
+            attention_mask,
+            decoder_padding_mask,
+            decoder_causal_mask=causal_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        if not return_dict:
+            return decoder_outputs + encoder_outputs
+
+        return Seq2SeqModelOutput(
+            last_hidden_state=decoder_outputs.last_hidden_state,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
+
+    def get_input_embeddings(self):
+        return self.shared
+
+    def set_input_embeddings(self, value):
+        self.shared = value
+        self.encoder.embed_tokens = self.shared
+        self.decoder.embed_tokens = self.shared
+
+    def get_output_embeddings(self):
+        return _make_linear_from_emb(self.shared)  # make it on the fly
+
+
+@add_start_docstrings(
+    "The QFS BART Model with a language modeling head. Can be used for summarization.", BART_START_DOCSTRING
+)
+class QfsBartForConditionalGeneration(PretrainedBartModel):
+    base_model_prefix = "model"
+    authorized_missing_keys = [r"final_logits_bias", r"encoder\.version", r"decoder\.version"]
+
+    def __init__(self, config: BartConfig):
+        super().__init__(config)
+        base_model = QfsBartModel(config)
+        self.model = base_model
+        self.register_buffer("final_logits_bias", torch.zeros((1, self.model.shared.num_embeddings)))
+
+    def resize_token_embeddings(self, new_num_tokens: int) -> nn.Embedding:
+        old_num_tokens = self.model.shared.num_embeddings
+        new_embeddings = super().resize_token_embeddings(new_num_tokens)
+        self.model.shared = new_embeddings
+        self._resize_final_logits_bias(new_num_tokens, old_num_tokens)
+        return new_embeddings
+
+    def _resize_final_logits_bias(self, new_num_tokens: int, old_num_tokens: int) -> None:
+        if new_num_tokens <= old_num_tokens:
+            new_bias = self.final_logits_bias[:, :new_num_tokens]
+        else:
+            extra_bias = torch.zeros((1, new_num_tokens - old_num_tokens), device=self.final_logits_bias.device)
+            new_bias = torch.cat([self.final_logits_bias, extra_bias], dim=1)
+        self.register_buffer("final_logits_bias", new_bias)
+
+    @add_start_docstrings_to_model_forward(BART_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
+    @add_end_docstrings(BART_GENERATION_EXAMPLE)
+    def forward(
+            self,
+            input_ids,
+            query_relevance_ids=None,
+            attention_mask=None,
+            decoder_input_ids=None,
+            decoder_attention_mask=None,
+            encoder_outputs=None,
+            past_key_values=None,
+            labels=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss. Indices should either be in ``[0, ...,
+            config.vocab_size]`` or -100 (see ``input_ids`` docstring). Tokens with indices set to ``-100`` are ignored
+            (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``.
+
+        Returns:
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if labels is not None:
+            use_cache = False
+            if decoder_input_ids is None:
+                decoder_input_ids = shift_tokens_right(labels, self.config.pad_token_id)
+
+        outputs = self.model(
+            input_ids,
+            query_relevance_ids=query_relevance_ids,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            encoder_outputs=encoder_outputs,
+            decoder_attention_mask=decoder_attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        lm_logits = F.linear(outputs[0], self.model.shared.weight, bias=self.final_logits_bias)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            # TODO(SS): do we need to ignore pad tokens in labels?
+            masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
+
+        if not return_dict:
+            output = (lm_logits,) + outputs[1:]
+            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        return Seq2SeqLMOutput(
+            loss=masked_lm_loss,
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+        )
+
+    def prepare_inputs_for_generation(
+            self, decoder_input_ids, past=None, attention_mask=None, use_cache=None, encoder_outputs=None, **kwargs
+    ):
+        return {
+            "input_ids": None,  # encoder_outputs is defined. input_ids not needed
+            "encoder_outputs": encoder_outputs,
+            "past_key_values": past,
+            "decoder_input_ids": decoder_input_ids,
+            "attention_mask": attention_mask,
+            "use_cache": use_cache,  # change this to avoid caching (presumably for debugging)
+        }
+
+    def adjust_logits_during_generation(self, logits, cur_len, max_length):
+        if cur_len == 1 and self.config.force_bos_token_to_be_generated:
+            self._force_token_id_to_be_generated(logits, self.config.bos_token_id)
+        elif cur_len == max_length - 1 and self.config.eos_token_id is not None:
+            self._force_token_id_to_be_generated(logits, self.config.eos_token_id)
+        return logits
+
+    @staticmethod
+    def _force_token_id_to_be_generated(scores, token_id) -> None:
+        """force one of token_ids to be generated by setting prob of all other tokens to 0 (logprob=-float("inf"))"""
+        scores[:, [x for x in range(scores.shape[1]) if x != token_id]] = -float("inf")
+
+    @staticmethod
+    def _reorder_cache(past, beam_idx):
+        reordered_past = []
+        for layer_past in past:
+            # get the correct batch idx from decoder layer's batch dim for cross and self-attn
+            layer_past_new = {
+                attn_key: _reorder_buffer(attn_cache, beam_idx) for attn_key, attn_cache in layer_past.items()
+            }
+            reordered_past.append(layer_past_new)
+        return reordered_past
+
+    def get_encoder(self):
+        return self.model.encoder
+
+    def get_output_embeddings(self):
+        return _make_linear_from_emb(self.model.shared)  # make it on the fly

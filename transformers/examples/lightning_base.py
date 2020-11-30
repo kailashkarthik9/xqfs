@@ -22,6 +22,8 @@ from transformers import (
     PretrainedConfig,
     PreTrainedTokenizer,
 )
+from transformers.models.bart.modeling_bart import QfsBartForConditionalGeneration
+from transformers.models.bart.tokenization_bart_fast import QfsBartTokenizerFast
 from transformers.optimization import (
     Adafactor,
     get_cosine_schedule_with_warmup,
@@ -52,6 +54,7 @@ MODEL_MODES = {
     "token-classification": AutoModelForTokenClassification,
     "language-modeling": AutoModelWithLMHead,
     "summarization": AutoModelForSeq2SeqLM,
+    "qfs_summarization": QfsBartForConditionalGeneration,
     "translation": AutoModelForSeq2SeqLM,
 }
 
@@ -106,10 +109,16 @@ class BaseTransformer(pl.LightningModule):
                 setattr(self.config, p, getattr(self.hparams, p))
 
         if tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.hparams.tokenizer_name if self.hparams.tokenizer_name else self.hparams.model_name_or_path,
-                cache_dir=cache_dir,
-            )
+            if self.hparams.task == 'qfs_summarization':
+                self.tokenizer = QfsBartTokenizerFast.from_pretrained(
+                    self.hparams.tokenizer_name if self.hparams.tokenizer_name else self.hparams.model_name_or_path,
+                    cache_dir=cache_dir,
+                )
+            else:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    self.hparams.tokenizer_name if self.hparams.tokenizer_name else self.hparams.model_name_or_path,
+                    cache_dir=cache_dir,
+                )
         else:
             self.tokenizer: PreTrainedTokenizer = tokenizer
         self.model_type = MODEL_MODES[mode]

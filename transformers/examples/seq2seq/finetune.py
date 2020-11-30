@@ -58,7 +58,8 @@ class SummarizationModule(BaseTransformer):
                 raise NotImplementedError("Dynamic Batch size does not work for multi-gpu training")
             if hparams.sortish_sampler:
                 raise ValueError("--sortish_sampler and --max_tokens_per_batch may not be used simultaneously")
-
+        if hparams.task == "qfs_summarization":
+            self.mode = "qfs_summarization"
         super().__init__(hparams, num_labels=None, mode=self.mode, **kwargs)
         use_task_specific_params(self.model, "summarization")
         save_git_info(self.hparams.output_dir)
@@ -209,14 +210,25 @@ class SummarizationModule(BaseTransformer):
         t0 = time.time()
 
         # parser.add_argument('--eval_max_gen_length', type=int, default=None, help='never generate more than n tokens')
-        generated_ids = self.model.generate(
-            batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            use_cache=True,
-            decoder_start_token_id=self.decoder_start_token_id,
-            num_beams=self.eval_beams,
-            max_length=self.eval_max_length,
-        )
+        if self.mode == "qfs_summarization":
+            generated_ids = self.model.generate(
+                batch["input_ids"],
+                query_relevance_ids=batch['query_relevance_ids'],
+                attention_mask=batch["attention_mask"],
+                use_cache=True,
+                decoder_start_token_id=self.decoder_start_token_id,
+                num_beams=self.eval_beams,
+                max_length=self.eval_max_length,
+            )
+        else:
+            generated_ids = self.model.generate(
+                batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                use_cache=True,
+                decoder_start_token_id=self.decoder_start_token_id,
+                num_beams=self.eval_beams,
+                max_length=self.eval_max_length,
+            )
         gen_time = (time.time() - t0) / batch["input_ids"].shape[0]
         preds: List[str] = self.ids_to_clean_text(generated_ids)
         target: List[str] = self.ids_to_clean_text(batch["labels"])
@@ -376,6 +388,10 @@ def main(args, model=None) -> SummarizationModule:
     if model is None:
         if "summarization" in args.task:
             model: SummarizationModule = SummarizationModule(args)
+            if "qfs" in args.task:
+                special_tokens_dict = {'additional_special_tokens': ['[Q]']}
+                num_added_toks = model.tokenizer.add_special_tokens(special_tokens_dict)
+                model.model.resize_token_embeddings(len(model.tokenizer))
         else:
             model: SummarizationModule = TranslationModule(args)
     dataset = Path(args.data_dir).name
