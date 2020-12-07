@@ -267,9 +267,9 @@ class QfsCorpusGenerator:
             raise Exception('Please specify a dataset split to create the tester corpus')
         random.seed(9)
         with open(path.join(summarization_dir, dataset_split + f'.{summarization_corpus}.source')) as fp:
-            qas_sources = fp.read().strip().split('\n')
+            qas_sources = fp.read().strip().split('\n')[:-1]
         with open(path.join(summarization_dir, dataset_split + f'.{summarization_corpus}.target')) as fp:
-            qas_targets = fp.read().strip().split('\n')
+            qas_targets = fp.read().strip().split('\n')[:-1]
         qas_corpus = zip(qas_sources, qas_targets)
         qas_corpus = list(qas_corpus)
         random.shuffle(qas_corpus)
@@ -298,37 +298,49 @@ class QfsCorpusGenerator:
         logger.info('Full corpus creation stage started')
         random.seed(9)
         with open(path.join(summarization_dir, f'train.{summarization_corpus}.source')) as fp:
-            train_qas_sources = fp.read().strip().split('\n')
+            train_qas_sources = fp.read().strip().split('\n')[:-1]
         with open(path.join(summarization_dir, f'train.{summarization_corpus}.target')) as fp:
-            train_qas_targets = fp.read().strip().split('\n')
+            train_qas_targets = fp.read().strip().split('\n')[:-1]
         train_qas_corpus = zip(train_qas_sources, train_qas_targets)
         train_qas_corpus = list(train_qas_corpus)
         random.shuffle(train_qas_corpus)
         train = train_qas_corpus[:len(train_qas_corpus) - VAL_SET_SIZE]
         val = train_qas_corpus[len(train_qas_corpus) - VAL_SET_SIZE:]
         with open(path.join(summarization_dir, f'valid.{summarization_corpus}.source')) as fp:
-            val_qas_sources = fp.read().strip().split('\n')
+            val_qas_sources = fp.read().strip().split('\n')[:-1]
         with open(path.join(summarization_dir, f'valid.{summarization_corpus}.target')) as fp:
-            val_qas_targets = fp.read().strip().split('\n')
+            val_qas_targets = fp.read().strip().split('\n')[:-1]
         val_qas_corpus = zip(val_qas_sources, val_qas_targets)
         val_qas_corpus = list(val_qas_corpus)
         test = val_qas_corpus
         logger.info(f'Writing {len(train)} train, {len(val)} val and {len(test)} test instances')
         with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'train.source'), 'w') as source_fp, open(
                 path.join(full_corpus_dir, f'{summarization_corpus}', 'train.target'), 'w') as target_fp:
-            for source, target in train:
-                source_fp.write(source + '\n')
-                target_fp.write(target + '\n')
+            for idx, (source, target) in enumerate(train):
+                if idx == 0:
+                    source_fp.write(source)
+                    target_fp.write(target)
+                else:
+                    source_fp.write('\n' + source)
+                    target_fp.write('\n' + target)
         with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'val.source'), 'w') as source_fp, open(
                 path.join(full_corpus_dir, f'{summarization_corpus}', 'val.target'), 'w') as target_fp:
-            for source, target in val:
-                source_fp.write(source + '\n')
-                target_fp.write(target + '\n')
+            for idx, (source, target) in enumerate(val):
+                if idx == 0:
+                    source_fp.write(source)
+                    target_fp.write(target)
+                else:
+                    source_fp.write('\n' + source)
+                    target_fp.write('\n' + target)
         with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'test.source'), 'w') as source_fp, open(
                 path.join(full_corpus_dir, f'{summarization_corpus}', 'test.target'), 'w') as target_fp:
-            for source, target in test:
-                source_fp.write(source + '\n')
-                target_fp.write(target + '\n')
+            for idx, (source, target) in enumerate(test):
+                if idx == 0:
+                    source_fp.write(source)
+                    target_fp.write(target)
+                else:
+                    source_fp.write('\n' + source)
+                    target_fp.write('\n' + target)
         logger.info('Full corpus creation stage completed!')
 
 
