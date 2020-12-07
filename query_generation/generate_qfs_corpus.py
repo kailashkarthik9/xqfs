@@ -317,6 +317,8 @@ class QfsCorpusGenerator:
         with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'train.source'), 'w') as source_fp, open(
                 path.join(full_corpus_dir, f'{summarization_corpus}', 'train.target'), 'w') as target_fp:
             for idx, (source, target) in enumerate(train):
+                if source.strip() == '' or target.strip() == '':
+                    continue
                 if idx == 0:
                     source_fp.write(source)
                     target_fp.write(target)
@@ -326,6 +328,8 @@ class QfsCorpusGenerator:
         with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'val.source'), 'w') as source_fp, open(
                 path.join(full_corpus_dir, f'{summarization_corpus}', 'val.target'), 'w') as target_fp:
             for idx, (source, target) in enumerate(val):
+                if source.strip() == '' or target.strip() == '':
+                    continue
                 if idx == 0:
                     source_fp.write(source)
                     target_fp.write(target)
@@ -335,6 +339,8 @@ class QfsCorpusGenerator:
         with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'test.source'), 'w') as source_fp, open(
                 path.join(full_corpus_dir, f'{summarization_corpus}', 'test.target'), 'w') as target_fp:
             for idx, (source, target) in enumerate(test):
+                if source.strip() == '' or target.strip() == '':
+                    continue
                 if idx == 0:
                     source_fp.write(source)
                     target_fp.write(target)
