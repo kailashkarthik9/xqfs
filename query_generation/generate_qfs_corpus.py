@@ -31,6 +31,8 @@ MAX_QUERIES_PER_DOCUMENT = 3
 KEYPHRASE_SCORE_THRESHOLD = 0.7
 # This separator must be shared by Pegasus' tokenizer so that it is not split
 QUERY_SEPARATOR = '[Q]'
+# The size of the validation set
+VAL_SET_SIZE = 20000
 
 
 class QfsCorpusGenerationStage(Enum):
@@ -39,6 +41,7 @@ class QfsCorpusGenerationStage(Enum):
     QFS_CORPUS_CREATION = 'qfs_corpus_creation'
     TRANSFORMER_FORMATTING = 'transformer_formatting'
     HYPOTHESIS_TESTER_CORPUS_CREATION = 'hypothesis_tester_corpus_creation'
+    FULL_CORPUS_CREATION = 'full_corpus_creation'
 
 
 class QfsCorpusGenerator:
@@ -290,6 +293,44 @@ class QfsCorpusGenerator:
                 target_fp.write(target + '\n')
         logger.info('Hypothesis tester corpus creation stage completed!')
 
+    @staticmethod
+    def perform_full_corpus_creation(summarization_dir, full_corpus_dir, summarization_corpus):
+        logger.info('Full corpus creation stage started')
+        random.seed(9)
+        with open(path.join(summarization_dir, f'train.{summarization_corpus}.source')) as fp:
+            train_qas_sources = fp.read().strip().split('\n')
+        with open(path.join(summarization_dir, f'train.{summarization_corpus}.target')) as fp:
+            train_qas_targets = fp.read().strip().split('\n')
+        train_qas_corpus = zip(train_qas_sources, train_qas_targets)
+        train_qas_corpus = list(train_qas_corpus)
+        random.shuffle(train_qas_corpus)
+        train = train_qas_corpus[:len(train_qas_corpus) - VAL_SET_SIZE]
+        val = train_qas_corpus[len(train_qas_corpus) - VAL_SET_SIZE:]
+        with open(path.join(summarization_dir, f'valid.{summarization_corpus}.source')) as fp:
+            val_qas_sources = fp.read().strip().split('\n')
+        with open(path.join(summarization_dir, f'valid.{summarization_corpus}.target')) as fp:
+            val_qas_targets = fp.read().strip().split('\n')
+        val_qas_corpus = zip(val_qas_sources, val_qas_targets)
+        val_qas_corpus = list(val_qas_corpus)
+        test = val_qas_corpus
+        logger.info(f'Writing {len(train)} train, {len(val)} val and {len(test)} test instances')
+        with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'train.source'), 'w') as source_fp, open(
+                path.join(full_corpus_dir, f'{summarization_corpus}', 'train.target'), 'w') as target_fp:
+            for source, target in train:
+                source_fp.write(source + '\n')
+                target_fp.write(target + '\n')
+        with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'val.source'), 'w') as source_fp, open(
+                path.join(full_corpus_dir, f'{summarization_corpus}', 'val.target'), 'w') as target_fp:
+            for source, target in val:
+                source_fp.write(source + '\n')
+                target_fp.write(target + '\n')
+        with open(path.join(full_corpus_dir, f'{summarization_corpus}', 'test.source'), 'w') as source_fp, open(
+                path.join(full_corpus_dir, f'{summarization_corpus}', 'test.target'), 'w') as target_fp:
+            for source, target in test:
+                source_fp.write(source + '\n')
+                target_fp.write(target + '\n')
+        logger.info('Full corpus creation stage completed!')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -298,7 +339,9 @@ if __name__ == '__main__':
     parser.add_argument("-qfs_dir", type=str, default='data/cnndm/qfs')
     parser.add_argument("-summarization_dir", type=str, default='data/cnndm/summarization')
     parser.add_argument("-hypothesis_corpus_dir", type=str, default='data/cnndm/hypothesis_tester')
+    parser.add_argument("-full_corpus_dir", type=str, default='data/cnndm/full_corpus')
     parser.add_argument("-hypothesis_corpus", type=str, default='qas.single')
+    parser.add_argument("-summarization_corpus", type=str, default='qas.single')
     parser.add_argument("-sent2vec_model", type=str, default='models/sent2vec/wiki_bigrams.bin')
     parser.add_argument("-idf_model", type=str, default='models/idf/idf_cnndm.pkl')
     parser.add_argument("-dataset_split", type=str, default='*')
@@ -323,3 +366,5 @@ if __name__ == '__main__':
         qfs_corpus_generator.perform_hypothesis_tester_corpus_creation(args.summarization_dir,
                                                                        args.hypothesis_corpus_dir, args.dataset_split,
                                                                        args.hypothesis_corpus)
+    elif args.stage == QfsCorpusGenerationStage.FULL_CORPUS_CREATION:
+        qfs_corpus_generator.perform_full_corpus_creation(args.summarization_dir, args.full_corpus_dir, args.summarization_corpus)
