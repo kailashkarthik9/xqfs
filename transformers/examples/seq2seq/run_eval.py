@@ -12,6 +12,8 @@ from typing import Dict, List
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers.models.bart.modeling_bart import QfsBartForConditionalGeneration
+from transformers.models.bart.tokenization_bart_fast import QfsBartTokenizerFast
 from utils import calculate_bleu, calculate_rouge, chunks, parse_numeric_n_bool_cl_kwargs, use_task_specific_params
 
 logger = getLogger(__name__)
@@ -33,12 +35,18 @@ def generate_summaries_or_translations(
     """Save model.generate results to <out_file>, and return how long it took."""
     fout = Path(out_file).open("w", encoding="utf-8")
     model_name = str(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
+    if task == 'qfs_summarization':
+        model = QfsBartForConditionalGeneration.from_pretrained(model_name).to(device)
+    else:
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
     if fp16:
         model = model.half()
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    logger.info(f"Inferred tokenizer type: {tokenizer.__class__}")  # if this is wrong, check config.model_type.
+    if task == 'qfs_summarization':
+        tokenizer = QfsBartTokenizerFast.from_pretrained(model_name)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        logger.info(f"Inferred tokenizer type: {tokenizer.__class__}")  # if this is wrong, check config.model_type.
 
     start_time = time.time()
     # update config with task specific params
@@ -47,12 +55,21 @@ def generate_summaries_or_translations(
         prefix = prefix or getattr(model.config, "prefix", "") or ""
     for examples_chunk in tqdm(list(chunks(examples, batch_size))):
         examples_chunk = [prefix + text for text in examples_chunk]
-        batch = tokenizer(examples_chunk, return_tensors="pt", truncation=True, padding="longest").to(device)
-        summaries = model.generate(
-            input_ids=batch.input_ids,
-            attention_mask=batch.attention_mask,
-            **generate_kwargs,
-        )
+        batch = tokenizer.prepare_seq2seq_batch(examples_chunk, return_tensors='pt', truncation=True, padding='longest').to(device)
+        # batch = tokenizer(examples_chunk, return_tensors="pt", truncation=True, padding="longest").to(device)
+        if task == 'qfs_summarization':
+            summaries = model.generate(
+                input_ids=batch.input_ids,
+                attention_mask=batch.attention_mask,
+                query_relevance_ids=batch.query_relevance_ids,
+                **generate_kwargs,
+            )
+        else:
+            summaries = model.generate(
+                input_ids=batch.input_ids,
+                attention_mask=batch.attention_mask,
+                **generate_kwargs,
+            )
         dec = tokenizer.batch_decode(summaries, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         for hypothesis in dec:
             fout.write(hypothesis + "\n")

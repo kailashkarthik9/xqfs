@@ -131,6 +131,7 @@ class QfsBartTokenizerFast(RobertaTokenizerFast):
             truncation=truncation,
             **kwargs,
         )
+        model_inputs['query_relevance_ids'] = self.add_query_relevance_ids(src_texts, model_inputs['offset_mapping'])
         if tgt_texts is None:
             return model_inputs
         # Process tgt_texts
@@ -146,7 +147,6 @@ class QfsBartTokenizerFast(RobertaTokenizerFast):
             **kwargs,
         )["input_ids"]
         model_inputs["labels"] = labels
-        model_inputs['query_relevance_ids'] = self.add_query_relevance_ids(src_texts, model_inputs['offset_mapping'])
         return model_inputs
 
     def add_query_relevance_ids(self, src_texts, offsets_mapping):
