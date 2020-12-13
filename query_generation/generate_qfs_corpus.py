@@ -13,6 +13,7 @@ from tqdm import tqdm
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
+import string
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s: %(levelname)s: %(message)s', level=logging.DEBUG)
@@ -42,6 +43,9 @@ class QfsCorpusGenerationStage(Enum):
     TRANSFORMER_FORMATTING = 'transformer_formatting'
     HYPOTHESIS_TESTER_CORPUS_CREATION = 'hypothesis_tester_corpus_creation'
     FULL_CORPUS_CREATION = 'full_corpus_creation'
+    XQFS_CORPUS_CREATION = 'xqfs_corpus_creation'
+    XQFS_TRANSFORMER_FORMATTING = 'xqfs_transformer_formatting'
+    XQFS_FULL_CORPUS_CREATION = 'xqfs_full_corpus_creation'
 
 
 class QfsCorpusGenerator:
@@ -261,7 +265,8 @@ class QfsCorpusGenerator:
         logger.info('Transformer formatting stage completed!')
 
     @staticmethod
-    def perform_hypothesis_tester_corpus_creation(summarization_dir, hypothesis_corpus_dir, dataset_split, summarization_corpus):
+    def perform_hypothesis_tester_corpus_creation(summarization_dir, hypothesis_corpus_dir, dataset_split,
+                                                  summarization_corpus):
         logger.info('Hypothesis tester corpus creation stage started')
         if dataset_split == '*':
             raise Exception('Please specify a dataset split to create the tester corpus')
@@ -349,6 +354,129 @@ class QfsCorpusGenerator:
                     target_fp.write('\n' + target)
         logger.info('Full corpus creation stage completed!')
 
+    @staticmethod
+    def perform_xqfs_corpus_creation(rtt_dir, qfs_dir, xqfs_dir, translation_dir, rtt_lang, splits_to_exclude):
+        logger.info('XQFS corpus creation stage started')
+        for split in DATASET_SPLITS:
+            if split in splits_to_exclude:
+                logger.info(f'Skipping {split} split')
+                continue
+            logger.info(f'Processing {split} split')
+            with open(path.join(translation_dir, f'{split}.sorted.txt')) as fp:
+                eng_data = fp.read().split('\n')
+            with open(path.join(rtt_dir, f'{rtt_lang}.{split}.sorted.txt')) as fp:
+                foreign_data = fp.read().split('\n')[:-1]
+            with open(path.join(rtt_dir, f'en.{rtt_lang}.{split}.sorted.txt')) as fp:
+                rtt_data = fp.read().split('\n')[:-1]
+            assert len(eng_data) == len(foreign_data) == len(rtt_data)
+            sort_map = json.load(open(path.join(translation_dir, f'{split}.sorted.map.json')))
+            merge_map = json.load(open(path.join(translation_dir, f'{split}.merged.map.json')))
+
+            eng_map = dict()
+            rtt_map = dict()
+            for doc in merge_map:
+                article_from_eng_file = list()
+                article_from_rtt_file = list()
+                for sent_idx in range(doc['start'], doc['end']):
+                    article_from_eng_file.append(
+                        eng_data[sort_map[str(sent_idx)]].strip())
+                    article_from_rtt_file.append(
+                        rtt_data[sort_map[str(sent_idx)]].strip())
+                eng_map[doc['id']] = article_from_eng_file
+                rtt_map[doc['id']] = article_from_rtt_file
+
+            single_json = json.load(open(path.join(qfs_dir, f'{split}.qfs.single.json')))
+            for doc in single_json:
+                id_ = doc['id'].split('_')[0]
+                doc['article'] = rtt_map[id_]
+            json.dump(single_json, open(path.join(xqfs_dir, f'{split}.qfs.single.rtt.json'), 'w'), indent=4)
+
+            multiple_json = json.load(open(path.join(qfs_dir, f'{split}.qfs.multiple.json')))
+            for doc in multiple_json:
+                id_ = doc['id'].split('_')[0]
+                doc['article'] = rtt_map[id_]
+            json.dump(multiple_json, open(path.join(xqfs_dir, f'{split}.qfs.multiple.rtt.json'), 'w'), indent=4)
+        logger.info('XQFS corpus creation stage completed!')
+
+    @staticmethod
+    def is_short_sentence(sent_idx, sent):
+        if sent_idx < 10 and len(sent.split(' ')) < 3:
+            return True
+        if all(char in string.punctuation for char in sent):
+            return True
+        return False
+
+    @staticmethod
+    def perform_xqfs_transformer_formatting(xqfs_dir, xqfs_summarization_dir, splits_to_exclude,
+                                            remove_short_sentences=False, qfs_dir=None):
+        logger.info('XQFS transformer formatting stage started')
+        if remove_short_sentences and qfs_dir is None:
+            raise Exception('To remove short sentences, the original english QFS corpus directory must be provided')
+        for split in DATASET_SPLITS:
+            if split in splits_to_exclude:
+                logger.info(f'Skipping {split} split')
+                continue
+            logger.info(f'Processing {split} split')
+            if remove_short_sentences:
+                single_query_corpus = json.load(open(path.join(qfs_dir, f'{split}.qfs.single.json')))
+                multiple_query_corpus = json.load(open(path.join(qfs_dir, f'{split}.qfs.multiple.json')))
+            x_single_query_corpus = json.load(open(path.join(xqfs_dir, f'{split}.qfs.single.rtt.json')))
+            x_multiple_query_corpus = json.load(open(path.join(xqfs_dir, f'{split}.qfs.multiple.rtt.json')))
+
+            qfs_single_source = list()
+            qfs_single_target = list()
+            qas_single_source = list()
+            qas_single_target = list()
+            logger.info(f'Formatting single query corpus')
+            for doc_idx, doc in enumerate(x_single_query_corpus):
+                if remove_short_sentences:
+                    article = ' '.join(x_sent for sent_idx, (x_sent, sent) in
+                                       enumerate(zip(doc['article'], single_query_corpus[doc_idx]['article'])) if
+                                       not QfsCorpusGenerator.is_short_sentence(sent_idx, sent))
+                else:
+                    article = ' '.join(doc['article'])
+                summary = ' '.join(doc['summary'])
+                query = doc['query']
+                qfs_single_source.append(query + ' ' + QUERY_SEPARATOR + ' ' + article)
+                qas_single_source.append(article)
+                qfs_single_target.append(summary)
+                qas_single_target.append(summary)
+
+            with open(path.join(xqfs_summarization_dir, split + '.qfs.single.source'), 'w') as fp:
+                for line in qfs_single_source:
+                    fp.write(line + '\n')
+            with open(path.join(xqfs_summarization_dir, split + '.qfs.single.target'), 'w') as fp:
+                for line in qfs_single_target:
+                    fp.write(line + '\n')
+            with open(path.join(xqfs_summarization_dir, split + '.qas.single.source'), 'w') as fp:
+                for line in qas_single_source:
+                    fp.write(line + '\n')
+            with open(path.join(xqfs_summarization_dir, split + '.qas.single.target'), 'w') as fp:
+                for line in qas_single_target:
+                    fp.write(line + '\n')
+
+            qfs_multi_source = list()
+            qfs_multi_target = list()
+            logger.info(f'Formatting multiple query corpus')
+            for doc_idx, doc in enumerate(x_multiple_query_corpus):
+                if remove_short_sentences:
+                    article = ' '.join(x_sent for sent_idx, (x_sent, sent) in
+                                       enumerate(zip(doc['article'], multiple_query_corpus[doc_idx]['article'])) if
+                                       not QfsCorpusGenerator.is_short_sentence(sent_idx, sent))
+                else:
+                    article = ' '.join(doc['article'])
+                summary = ' '.join(doc['summary'])
+                query = doc['query']
+                qfs_multi_source.append(query + ' ' + QUERY_SEPARATOR + ' ' + article)
+                qfs_multi_target.append(summary)
+            with open(path.join(xqfs_summarization_dir, split + '.qfs.multiple.source'), 'w') as fp:
+                for line in qfs_multi_source:
+                    fp.write(line + '\n')
+            with open(path.join(xqfs_summarization_dir, split + '.qfs.multiple.target'), 'w') as fp:
+                for line in qfs_multi_target:
+                    fp.write(line + '\n')
+        logger.info('XQFS Transformer formatting stage completed!')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -360,6 +488,12 @@ if __name__ == '__main__':
     parser.add_argument("-full_corpus_dir", type=str, default='data/cnndm/full_corpus')
     parser.add_argument("-hypothesis_corpus", type=str, default='qas.single')
     parser.add_argument("-summarization_corpus", type=str, default='qas.single')
+    parser.add_argument("-translation_dir", type=str, default='data/cnndm/translation')
+    parser.add_argument("-rtt_dir", type=str, default='data/cnndm/rtt')
+    parser.add_argument("-xqfs_dir", type=str, default='data/cnndm/rtt_qfs')
+    parser.add_argument("-xqfs_summarization_dir", type=str, default='data/cnndm/rtt_summarization')
+    parser.add_argument("-xqfs_full_corpus_dir", type=str, default='data/cnndm/rtt_full_corpus')
+    parser.add_argument("-rtt_lang", type=str, default='ar')
     parser.add_argument("-sent2vec_model", type=str, default='models/sent2vec/wiki_bigrams.bin')
     parser.add_argument("-idf_model", type=str, default='models/idf/idf_cnndm.pkl')
     parser.add_argument("-dataset_split", type=str, default='*')
@@ -385,4 +519,15 @@ if __name__ == '__main__':
                                                                        args.hypothesis_corpus_dir, args.dataset_split,
                                                                        args.hypothesis_corpus)
     elif args.stage == QfsCorpusGenerationStage.FULL_CORPUS_CREATION:
-        qfs_corpus_generator.perform_full_corpus_creation(args.summarization_dir, args.full_corpus_dir, args.summarization_corpus)
+        qfs_corpus_generator.perform_full_corpus_creation(args.summarization_dir, args.full_corpus_dir,
+                                                          args.summarization_corpus)
+    elif args.stage == QfsCorpusGenerationStage.XQFS_CORPUS_CREATION:
+        qfs_corpus_generator.perform_xqfs_corpus_creation(args.rtt_dir, args.qfs_dir, args.xqfs_dir,
+                                                          args.translation_dir,
+                                                          args.rtt_lang, splits_to_exclude)
+    elif args.stage == QfsCorpusGenerationStage.XQFS_TRANSFORMER_FORMATTING:
+        qfs_corpus_generator.perform_xqfs_transformer_formatting(args.xqfs_dir, args.xqfs_summarization_dir,
+                                                                 splits_to_exclude, True, args.qfs_dir)
+    elif args.stage == QfsCorpusGenerationStage.XQFS_FULL_CORPUS_CREATION:
+        qfs_corpus_generator.perform_full_corpus_creation(args.xqfs_summarization_dir, args.xqfs_full_corpus_dir,
+                                                          args.summarization_corpus)
