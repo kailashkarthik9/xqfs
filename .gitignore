@@ -1,3 +1,8 @@
 /data/
 /.idea/
 /models/sent2vec/wiki_bigrams.bin
+/output/cnndm/
+/transformers/examples/seq2seq/lightning_logs/
+/transformers/src/transformers.egg-info/
+/transformers/examples/seq2seq/.lock
+/.lock
