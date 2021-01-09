@@ -26,7 +26,8 @@ class FactualConsistencyPreprocessor:
             factcc_data.append({
                 'id': idx,
                 'text': article,
-                'claim': summary
+                'claim': summary,
+                'label': 'CORRECT'
             })
         logger.info(f'Writing data to output file')
         if not path.exists(output_dir):
